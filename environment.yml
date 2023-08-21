@@ -1,0 +1,12 @@
+name: seq2HLA
+channels:
+  - bioconda
+  - anaconda
+  - conda-forge
+  - defaults
+dependencies:
+  - biopython=1.79
+  - bowtie=1.0.0
+  - numpy=1.21.5
+  - python=3.7.16
+  - r-base=4.2.3
