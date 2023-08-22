@@ -1,12 +1,8 @@
 import os
 
-version = "2.4"
-
 module_dir = os.path.dirname(os.path.realpath(__file__))
 
 cmd_bowtie = "bowtie"
-cmd_R = os.path.join(module_dir, "command.R")
-cmd_fourdigit = os.path.join(module_dir, "command_fourdigit.R")
 
 bowtiebuild_class_I = os.path.join(module_dir, "references", "ClassIWithoutNQex2-3.plus75")
 bowtiebuild_class_I_nonclass = os.path.join(module_dir, "references", "Class1NonClassical")

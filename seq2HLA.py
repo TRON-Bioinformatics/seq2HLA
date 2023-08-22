@@ -1,87 +1,25 @@
-##########################################################################################################
-#Title:
-#seq2HLA - HLA typing from RNA-Seq sequence reads
-#
-#Release: 2.3
-#
-#Author:
-#Sebastian Boegel, 2012 - 2017 (c)
-#TRON - Translational Oncology at the University Medical Center Mainz, 55131 Mainz, Germany
-#University Medical Center of the Johannes Gutenberg-University Mainz, III.  Medical Department, Mainz, Germany
-#
-#Contact:
-#boegels@uni-mainz.de
-#seb.boegel@gmail.com
-#
-#Synopsis:
-#We developed an in-silico method "Seq2HLA", written in python and R, which takes standard RNA-Seq sequence reads in fastq format 
-#as input, uses a bowtie index comprising all HLA alleles and outputs the most likely HLA class I and class II genotypes (in 4 digit resolution), 
-#a p-value for each call, and the expression of each class 
-#
-#Usage: 
-#python seq2HLA.py -1 <readfile1> -2 <readfile2> -r "<runname>" [-p <int>]* [-3 <int>]**
-#*optional: number of parallel search threads for bowtie optional (Default:6)
-#**optional: trim int bases from the low-quality end of each read
-#readfile can be uncompressed or gzipped fastq file
-#runname should contain path information, e.g. "folder/subfolder/..../run", in order to store all resulting into to folder and all filenames will have the suffix run-
+#!/usr/bin/env python
 
-#Output:
-#The results are outputted to stdout and to textfiles. Most important are: 
-#i) <prefix>-ClassI.HLAgenotype2digits => 2 digit result of Class I
-#ii) <prefix>-ClassII.HLAgenotype2digits => 2 digit result of Class II
-#iii) <prefix>-ClassI.HLAgenotype4digits => 4 digit result of Class I
-#iv) <prefix>-ClassII.HLAgenotype4digits => 4 digit result of Class II
-#v) <prefix>.ambiguity => reports typing ambuigities (more than one solution for an allele possible)
-#vi) <prefix>-ClassI.expression => expression of Class I alleles
-#vii) <prefix>-ClassII.expression => expression of Class II alleles
-#
-#Dependencies:
-#0.) seq2HLA is a python script, developed with Python 2.6.8
-#1.) bowtie must be reachable by the command "bowtie". seq2HLA was developed and tested with bowtie version 0.12.7 (64-bit). The call to bowtie is invoked with 6 CPUs. You can change that by paramter -p.
-#2.) R must be installed, seq2HLA.py was developed and tested with R version 2.12.2 (2011-02-25)
-#3.) Input must be paired-end reads in fastq-format
-#4.) Index files must be located in the folder "references".
-#5.) Packages: biopython (developed with V1.58), numpy (1.3.0)
+"""
+Seq2HLA is an in-silico method, written in python and R, which takes standard RNA-Seq sequence reads in fastq format as input, uses a bowtie index comprising all HLA alleles and outputs the most likely HLA class I and class II genotypes (in 4 digit resolution), a p-value for each call, and the expression of each class.
+"""
 
-#Version history:
-#2.3: typing of HLA II loci DRA, DPA1 and DPB1, typing of non-classical HLA I alleles (e.g. HLA-G...), cleaning up after execution (deletion of intermediate files) (August 2017)
-#2.2: improved performance, automatic detection of read length (option -l no longer required), user can choose number of parralel search threads (-p), seq2HLA now works with automatic path recognition, so it can be invoked from every path (April 2014)
-#2.1: supports gzipped fastq files as input
-#2.0: 4-digit typing
-#1.0: 2-digit typing
+__author__ = "Sebastian Boegel"
+__copyright__ = "Copyright (c) 2023 Bioinformatics Group at TRON - Translational Oncology at the Medical Center of the Johannes Gutenberg-University Mainz gGmbH"
+__license__ = "MIT"
+__maintainer__ = "Patrick Sorn"
+__mail__ = "patrick.sorn@tron-mainz.de"
 
-#License:
-#The MIT License (MIT)
-#Copyright (c) 2012 Sebastian Boegel
-#Permission is hereby granted, free of charge, to any person obtaining a copy
-#of this software and associated documentation files (the "Software"), to deal
-#in the Software without restriction, including without limitation the rights
-#to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-#copies of the Software, and to permit persons to whom the Software is
-#furnished to do so, subject to the following conditions:
-#
-#The above copyright notice and this permission notice shall be included in
-#all copies or substantial portions of the Software.
-#
-#THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-#IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-#FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-#AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-#LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-#OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-#THE SOFTWARE.
-
-###########################################################################################################
 
 from argparse import ArgumentParser
 from glob import glob
 import gzip
 import linecache
+import logging
 from operator import itemgetter
 import os
 import subprocess
 import sys
-import time
 
 # External modules
 from Bio import SeqIO
@@ -89,7 +27,9 @@ import numpy as np
 
 # Internal modules
 import config as cfg
+from confidence import calculate_confidence
 import fourdigits
+from version import version
 
 
 def is_gzipped(infile):
@@ -103,42 +43,120 @@ def is_gzipped(infile):
     return gzipped
 
 
+def get_read_len(fq_file, gzipped):
+    cmd = None
+
+    if gzipped:
+        cmd = "zcat {} | sed '2q;d' | wc -L".format(fq_file)
+    else:
+        cmd = "sed '2q;d' {} | wc -L".format(fq_file)
+            
+    process_wc = subprocess.Popen(["bash", "-c", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    read_len = process_wc.communicate()[0]
+    return read_len
+
+
+#Return the p value of a prediction, which is stored in the intermediate textfile
+def get_P(locus, finaloutput):
+    locus_dict = {
+        "A": 2, "DQA1": 2, "E": 2,
+        "B": 3, "DQB1": 3, "F": 3,
+        "C": 4, "DRB1": 4, "G": 4,
+        "H": 5, "DRA": 5,
+        "J": 6, "DPA1": 6,
+        "K": 7, "DPB1": 7,
+        "L": 8,
+        "P": 9,
+        "V": 10
+    }
+    return linecache.getline(finaloutput, locus_dict[locus]).split("\t")[4][0:-1]
+
+
+#In case of ambiguous typings, the allele(s) with the best p-value (which is actually the smallest one, so the name of the function is misleading - sorry) is reported and thus the min(p) is returned
+def get_max_P(infile):
+    p = []
+    with open(infile) as inf:
+        for line in inf:
+            if not line[0] == "#":
+                if line.split("\t")[1][0:-1]=="NA":
+                    return "NA"
+                p.append(float(line.split("\t")[1][0:-1]))
+    try:
+        return min(p)
+    except ValueError:
+        return "NA"
+
+
+#Open sam-file and count mappings for each allele 
+def parse_mapping(hla_dict, sam, readcount):
+    with open(sam) as samhandle:
+        for line in samhandle:
+            if line[0] != '@':
+                hla = line.split('\t')[2]
+                readcount[hla_dict[hla]] += 1
+    return readcount
+
+
+
 class Pipeline(object):
-    def __init__(self, run_name, fq1, fq2, trim3, threads):
-        self.run_name = run_name
+    def __init__(self, working_dir, fq1, fq2, trim3, threads):
+        self.working_dir = os.path.abspath(working_dir.rstrip("/"))
+        if not os.path.exists(self.working_dir):
+            os.makedirs(self.working_dir)
         self.fq1 = fq1
         self.fq2 = fq2
-        self.fq1_2 = "{}-2nditeration_1.fq".format(run_name)
-        self.fq2_2 = "{}-2nditeration_2.fq".format(run_name)
         self.trim3 = trim3
         self.threads = threads
         self.gzipped = is_gzipped(self.fq1)
 
+        
+        self.logger = logging.getLogger("main")
+        self.logger.handlers = []
+        self.logger.setLevel(logging.DEBUG)
+
+        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+        streamHandler = logging.StreamHandler(sys.stdout)
+        streamHandler.setLevel(logging.DEBUG)
+        streamHandler.setFormatter(formatter)
+
+        fileHandler = logging.FileHandler(os.path.join(self.working_dir, "run.log"), "w+")
+        fileHandler.setLevel(logging.DEBUG)
+        fileHandler.setFormatter(formatter)
+
+        #self.logger = logging.getLogger("main")
+        #self.logger.addHandler(streamHandler)
+        
+        self.logger.addHandler(streamHandler)
+        self.logger.addHandler(fileHandler)
+
+
 
     def run(self):
-        print("Now running seq2HLA version {}!".format(cfg.version))
-        cmd = None
+        """This function starts predicting the HLA type for the input reads."""
+        script_call = "python {} -1 {} -2 {} -3 {} -o {} -p {}".format(
+            os.path.realpath(__file__),
+            self.fq1,
+            self.fq2,
+            self.trim3,
+            self.working_dir,
+            self.threads
+        )
 
-        if self.gzipped:
-            cmd = "zcat {} | sed '2q;d' | wc -L".format(self.fq1)
-            print("Input is gzipped")
-        else:
-            cmd = "sed '2q;d' {} | wc -L".format(self.fq1)
-            print("input is uncompressed")
-            
-        process_wc = subprocess.Popen(["bash", "-c", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        read_len = process_wc.communicate()[0]
-
+        self.logger.info("Starting seq2HLA pipeline version {}!".format(version))
+        self.logger.info("CMD: {}".format(script_call))
+        self.logger.info("Estimating mismatch ratio from read length.")
+        
+        read_len = get_read_len(self.fq1, self.gzipped)
         mismatch_ratio = round(int(read_len) / 50.0)
 
         mapopt = "-p {} -a -v {}".format(self.threads, mismatch_ratio)
 
-        print("The read length of your input fastq was determined to be {}, so {} mismatches will be allowed and {} threads will be used by bowtie.".format(read_len, mismatch_ratio, self.threads))
+        self.logger.info("The read length of your input fastq was determined to be {}, so {} mismatches will be allowed and {} threads will be used by bowtie.".format(read_len, mismatch_ratio, self.threads))
 
 
-	#call HLA typing for Class I, classical (A,B.C)
+	# call HLA typing for Class I, classical (A,B.C)
         self.call_HLA(
-            "{}-ClassI-class".format(self.run_name), 
             cfg.bowtiebuild_class_I, 
             cfg.fasta_class_I, 
             mapopt, 
@@ -148,9 +166,8 @@ class Pipeline(object):
             cfg.len_dict_I
         )
 
-	#call HLA typing for Class I, non-classical (E,G....)
+	# call HLA typing for Class I, non-classical (E,G....)
         self.call_HLA(
-            "{}-ClassI-nonclass".format(self.run_name),
             cfg.bowtiebuild_class_I_nonclass, 
             cfg.fasta_class_I_nonclass, 
             mapopt, 
@@ -160,9 +177,8 @@ class Pipeline(object):
             cfg.len_dict_I_nonclass
         )
 
-        #call HLA typing for Class II
+        # call HLA typing for Class II
         self.call_HLA(
-            "{}-ClassII".format(self.run_name),
             cfg.bowtiebuild_class_II,
             cfg.fasta_class_II,
             mapopt,
@@ -174,7 +190,8 @@ class Pipeline(object):
 
 
     #---------------Class I-------------------------------
-    def call_HLA(self, run_name, bowtiebuild, hla1fasta, mapopt, locus_list, hla_class, hla_classification, length_dict):
+    def call_HLA(self, bowtiebuild, hla1fasta, mapopt, locus_list, hla_class, hla_classification, length_dict):
+        """This method calls HLA types for class I."""
         twodigits1 = {}
         fourdigits1 = {}
         fourDigit_solutions1 = {}
@@ -187,74 +204,82 @@ class Pipeline(object):
 
         #-------1st iteration-----------------------------------
         if hla_class == 1:
-            print("----------HLA class I------------")
+            self.logger.info("----------HLA class I------------")
             if hla_classification == "classical":
-                print(">---classical HLA alleles---")
+                self.logger.info(">---classical HLA alleles---")
             else:
-                print(">---nonclassical HLA alleles---")
+                self.logger.info(">---nonclassical HLA alleles---")
         else:
-            print("----------HLA class II------------")
+            self.logger.info("----------HLA class II------------")
+        prefix = "hla_{}_{}".format(hla_class, hla_classification)
 
-        sam1 = "{}-iteration1.sam".format(run_name)
-        iteration = 1
-        print("First iteration starts....\nMapping ......")
-        t1 = time.time()
-        self.mapping(sam1, run_name, self.fq1, self.fq2, bowtiebuild, 1, mapopt)
-        print("Took {} seconds".format(time.time() - t1))
+        
+        #iteration = 1
+        fq1_2 = os.path.join(self.working_dir, "{}_iteration_2_1.fq".format(prefix))
+        fq2_2 = os.path.join(self.working_dir, "{}_iteration_2_2.fq".format(prefix))
+        sam1 = os.path.join(self.working_dir, "{}_iteration_1.sam".format(prefix))
+        sam2 = os.path.join(self.working_dir, "{}_iteration_2.sam".format(prefix))
+        sam3 = os.path.join(self.working_dir, "{}_iteration_3.sam".format(prefix))
+        aligned = os.path.join(self.working_dir, "{}.aligned".format(prefix))
+        aligned_1 = os.path.join(self.working_dir, "{}_1.aligned".format(prefix))
+        aligned_2 = os.path.join(self.working_dir, "{}_2.aligned".format(prefix))
+        bowtielog = os.path.join(self.working_dir, "{}.bowtielog".format(prefix))
+        output1 = os.path.join(self.working_dir, "{}.digitalhaplotype1".format(prefix))
+        output2 = os.path.join(self.working_dir, "{}.digitalhaplotype2".format(prefix))
+        output3 = os.path.join(self.working_dir, "{}.digitalhaplotype3".format(prefix))
+        medianfile = os.path.join(self.working_dir, "{}.digitalhaplotype1".format(prefix))
+        ambiguityfile = os.path.join(self.working_dir, "hla.ambiguity")
+        finaloutput = os.path.join(self.working_dir, "{}.HLAgenotype2digits".format(prefix))
+        finaloutput4digit = os.path.join(self.working_dir, "{}.HLAgenotype4digits".format(prefix))
+        
+        self.logger.info("Starting 1st iteration:")
+        self.logger.info("Mapping reads...")
+        self.mapping(sam1, aligned, bowtielog, self.fq1, self.fq2, bowtiebuild, 1, mapopt)
+        
         medians = {}
         for locus in locus_list:
             medians[locus] = 0
         medianflag = False
 
-        #Calculation of first digital haplotype.....
-        output1 = "{}.digitalhaplotype1".format(run_name)
-        print("Calculation of first digital haplotype.....")
-        (map, readcount, readspergroup) = self.create_ref_dict(hla1fasta, locus_list)
-        readcount = self.read_mapping(map, sam1, readcount)
-        t1 = time.time()
-        fourDigitString1 = self.predict_HLA(sam1, medians, output1, medianflag, locus_list, hla_class, readcount, readspergroup, hla_classification)
-        print("Took {} seconds".format(time.time() - t1))
-        print("1st iteration done.\nNow removing reads that mapped to the three top-scoring groups .......")
+        self.logger.info("Calculation of first digital haplotype...")
+        (hla_dict, readcount, readspergroup) = self.create_ref_dict(hla1fasta, locus_list)
+        readcount = parse_mapping(hla_dict, sam1, readcount)
+        fourDigitString1 = self.predict_HLA(sam1, medians, output1, medianflag, locus_list, hla_class, readcount, readspergroup, hla_classification, ambiguityfile)
+        self.logger.info("1st iteration done.\nNow removing reads that mapped to the three top-scoring groups .......")
+        
         try:
-            self.remove_reads(run_name, self.create_remove_list(run_name, map, locus_list))
+            self.remove_reads(fq1_2, fq2_2, aligned_1, aligned_2, self.create_remove_list(sam1, output1, hla_dict, locus_list))
         except IOError:
-            print("Nothing to remove\n")
+            self.logger.debug("Nothing to remove\n")
 	
-        #------2nd iteration------------------------------------------
-        print("Second iterations starts .....\n Mapping ......")
+        self.logger.info("Starting 2nd iteration:")
+        self.logger.info("Mapping reads...")
         medians = {}
-        iteration = 2
-        sam2 = "{}-iteration2.sam".format(run_name)
-        fq1_2 = "{}-2nditeration_1.fq".format(run_name)
-        fq2_2 = "{}-2nditeration_2.fq".format(run_name)
-        t1 = time.time()
-        self.mapping(sam2, run_name, fq1_2, fq2_2, bowtiebuild, 2, mapopt)
-        print("Took {} seconds".format(time.time() - t1))
-        medianfile = "{}.digitalhaplotype1".format(run_name)
+        #iteration = 2
+        
+        self.mapping(sam2, aligned, bowtielog, fq1_2, fq2_2, bowtiebuild, 2, mapopt)
+
         row = 2
         for locus in locus_list:
             medians[locus] = linecache.getline(medianfile, row).split('\t', 3)[2]
             row += 1
         medianflag = True
-        output2 = "{}.digitalhaplotype2".format(run_name)
-        finaloutput = "{}.HLAgenotype2digits".format(run_name)
+
         #Calculation of second digital haplototype
-        print("Calculation of second digital haplotype.....")
-        (map, readcount, readspergroup) = self.create_ref_dict(hla1fasta, locus_list)
-        readcount = self.read_mapping(map, sam2, readcount)
-        t1 = time.time()
-        fourDigitString2 = self.predict_HLA(sam2, medians, output2, medianflag, locus_list, hla_class, readcount, readspergroup, hla_classification)
-        print("Took {} seconds".format(time.time() - t1))
-        print("2nd iteration done.")
+        self.logger.info("Calculating second digital haplotype...")
+        (hla_dict, readcount, readspergroup) = self.create_ref_dict(hla1fasta, locus_list)
+        readcount = parse_mapping(hla_dict, sam2, readcount)
+        fourDigitString2 = self.predict_HLA(sam2, medians, output2, medianflag, locus_list, hla_class, readcount, readspergroup, hla_classification, ambiguityfile)
+        self.logger.info("2nd iteration done.")
         self.report_HLA_genotype(output1, output2, finaloutput, locus_list)
-        print("Calculation of locus-specific expression ...")
+        self.logger.info("Calculating locus-specific expression...")
         try:
-            self.expression(locus_list, length_dict, map, run_name)
+            self.expression(aligned_1, sam1, bowtielog, output1, locus_list, length_dict, hla_dict)
         except IOError:
-            tmp = ""
+            #tmp = ""
             for locus in locus_list:
-                tmp += "{}: 0 RPKM\n".format(locus)
-            print(tmp)
+                #tmp += "{}: 0 RPKM\n".format(locus)
+                self.logger.debug("{}: 0 RPKM".format(locus))
 	
         #-----3rd iteration in case of at least one homozygous call-----------
         f1 = fourDigitString1.split(",")
@@ -279,16 +304,12 @@ class Pipeline(object):
         #try-catch block to prevent IO-Error in case of no expression
         try:
             if "no" in twodigits2.values():
-                self.remove_reads(run_name, self.create_remove_list_four_digits(run_name, map, fourdigits1))
-                sam3 = "{}-iteration3.sam".format(run_name)
-                t1 = time.time()
-                self.mapping(sam3, run_name, fq1_2, fq2_2, bowtiebuild, 2, mapopt)
-                print("Took {} seconds".format(time.time() - t1))
-                readcount = self.read_mapping(map, sam3, readcount)
-                output3 = "{}.digitalhaplotype3".format(run_name)
-                t1 = time.time()
-                fourDigitString3 = self.predict_HLA(sam3, medians, output3, medianflag, locus_list, hla_class, readcount, readspergroup, hla_classification)
-                print("Took {} seconds".format(time.time() - t1))
+                self.remove_reads(fq1_2, fq2_2, aligned_1, aligned_2, self.create_remove_list_four_digits(sam1, hla_dict, fourdigits1))
+                
+                self.mapping(sam3, aligned, bowtielog, fq1_2, fq2_2, bowtiebuild, 2, mapopt)
+                readcount = parse_mapping(hla_dict, sam3, readcount)
+
+                fourDigitString3 = self.predict_HLA(sam3, medians, output3, medianflag, locus_list, hla_class, readcount, readspergroup, hla_classification, ambiguityfile)
                 f3 = fourDigitString3.split(",")
                 alleleTwoDigit_index = 0
                 numberSolutions_index = 2
@@ -300,8 +321,8 @@ class Pipeline(object):
             #1st allele--------------------------------
             for locus in locus_list:
                 allele1 = fourdigits1[locus]
-                if not fourDigit_solutions1[locus]:
-                    if fourDigit_solutions1[locus] > 1:
+                if fourDigit_solutions1[locus]:
+                    if int(fourDigit_solutions1[locus]) > 1:
                         allele1 += "'"
                     finalAlleles[locus] = "{}\t{}\t".format(allele1, get_max_P("{}.4digits{}1.solutions".format(sam1, locus)))
                 else:
@@ -314,84 +335,97 @@ class Pipeline(object):
                 if allele2 == "no":
                     allele3 = twodigits3[locus]
                     if allele3 == "no" or fourDigit_solutions1[locus] == 1 or not allele3.split(":")[0] == fourdigits1[locus].split(":"):
-                        if fourDigit_solutions1[locus]:
+                        if not fourDigit_solutions1[locus]:
                             finalAlleles[locus] += "no\tNA"
                         else:
-                            finalAlleles[locus] += "{}\t{}".format(fourdigits1[locus], self.get_P(locus, finaloutput))
+                            finalAlleles[locus] += "{}\t{}".format(fourdigits1[locus], get_P(locus, finaloutput))
                     else:
                         allele3 = f3[alleleFourDigit_index]
                         if int(f3[alleleFourDigit_index+1]) > 1:
                             allele3 += "'"
-                        finalAlleles[locus] += "{}\t{}".format(allele3, self.get_max_P("{}.4digits{}2.solutions".format(sam3, locus)))
+                        finalAlleles[locus] += "{}\t{}".format(allele3, get_max_P("{}.4digits{}2.solutions".format(sam3, locus)))
                         alleleFourDigit_index += 3
                 else:
                     allele2 = fourdigits2[locus]
                     if int(fourDigit_solutions2[locus]) > 1:
                         allele2 += "'"
-                    finalAlleles[locus] += "{}\t{}".format(allele2, self.get_max_P("{}.4digits{}2.solutions".format(sam2, locus)))
+                    finalAlleles[locus] += "{}\t{}".format(allele2, get_max_P("{}.4digits{}2.solutions".format(sam2, locus)))
                     alleleFourDigit_index += 3
 	
-			
-            finaloutput4digit = "{}.HLAgenotype4digits".format(run_name)
             #output the 4-digit type (stdout and to file)
             self.report_HLA_four_digit_genotype(finalAlleles, finaloutput4digit, locus_list)
         except IOError:
             #no expression"
-            print("no expression")
-            finaloutput4digit = "{}.HLAgenotype4digits".format(run_name)
+            self.logger.info("no expression")
             for locus in locus_list:
                 finalAlleles[locus] = "no\tNA\tno\tNA"
             self.report_HLA_four_digit_genotype(finalAlleles, finaloutput4digit, locus_list)
 
-        self.cleanup(run_name)
+        self.cleanup()
 
 
-    def cleanup(self, run_name):
-        fq1_2 = "{}-2nditeration_1.fq".format(run_name)
-        fq2_2 = "{}-2nditeration_2.fq".format(run_name)
-        os.remove(fq1_2)
-        os.remove(fq2_2)
-        for file in glob("{}*.sam".format(run_name)):
-            os.remove(file)
-        for file in glob("{}*.4digits*".format(run_name)):
-            os.remove(file)
-        for file in glob("{}*.aligned*".format(run_name)):
-            os.remove(file)
-        for file in glob("{}*.digitalhaplo*".format(run_name)):
-            os.remove(file)
-        for file in glob("{}*.readspergroup*".format(run_name)):
-            os.remove(file)
+    def cleanup(self):
+        """Remove intermediate files."""
+        
+        files_to_keep = [
+            "hla_1_classical_iteration_1.sam",
+            "hla_1_classical.bowtielog",
+            "hla_1_classical.HLAgenotype2digits",
+            "hla_1_classical.HLAgenotype4digits",
+            "hla_1_nonclassical.bowtielog",
+            "hla_1_nonclassical.HLAgenotype2digits",
+            "hla_1_nonclassical.HLAgenotype4digits",
+            "hla_2_classical.bowtielog",
+            "hla_2_classical.HLAgenotype2digits",
+            "hla_2_classical.HLAgenotype4digits",
+            "hla.ambiguity",
+            "run.expression",
+            "run.log"
+        ]
 
-    #performs the bowtie mapping for the 2 iterations using the given parameters
-    def mapping(self, sam, run_name, fq1, fq2, bowtiebuild, iteration, mapopt):
+        for filename in os.listdir(self.working_dir):
+            if not filename in files_to_keep:
+                file_path = os.path.join(self.working_dir, filename)
+                self.logger.info("Removing {}.".format(file_path))
+                os.remove(file_path)
+
+
+    def mapping(self, sam, aligned_file, bowtielog, fq1, fq2, bowtiebuild, iteration, mapopt):
+        """Performs the bowtie mapping for the 2 iterations using the given parameters"""
         mapping_cmd = ""
         if os.path.exists(sam):
+            self.logger.info("Skipping mapping step as already done...")
             return
         if iteration == 1:
             if not self.gzipped:
-                mapping_cmd = "(bowtie -3 {} -S {} --al {}.aligned {} -1 {} -2 {} |  awk -F \'\\t\' '$3 != \"*\"{{ print $0 }}' > {}) 2> {}.bowtielog".format(self.trim3, mapopt, run_name, bowtiebuild, fq1, fq2, sam, run_name)
+                mapping_cmd = "(bowtie -3 {} -S {} --al {} {} -1 {} -2 {} |  awk -F \'\\t\' '$3 != \"*\"{{ print $0 }}' > {}) 2> {}".format(self.trim3, mapopt, aligned_file, bowtiebuild, fq1, fq2, sam, bowtielog)
             else:
-                mapping_cmd = "(bowtie -3 {} -S {} --al {}.aligned {} -1 <(zcat {}) -2 <(zcat {}) |  awk -F \'\\t\' '$3 != \"*\"{{ print $0 }}' > {}) 2> {}.bowtielog".format(self.trim3, mapopt, run_name, bowtiebuild, fq1, fq2, sam, run_name)
+                mapping_cmd = "(bowtie -3 {} -S {} --al {} {} -1 <(zcat {}) -2 <(zcat {}) |  awk -F \'\\t\' '$3 != \"*\"{{ print $0 }}' > {}) 2> {}".format(self.trim3, mapopt, aligned_file, bowtiebuild, fq1, fq2, sam, bowtielog)
         elif iteration == 2:
             mapping_cmd = "bowtie -3 {} -S {} {} -1 {} -2 {} {}".format(self.trim3, mapopt, bowtiebuild, fq1, fq2, sam)
         #execute bowtie
-        print("CMD:", mapping_cmd)
+        self.logger.info("CMD: {}".format(mapping_cmd))
         process_mapping = subprocess.Popen(['bash', '-c', mapping_cmd], stdout=subprocess.PIPE)
         out, err = process_mapping.communicate()
 	
         if iteration == 1:
             #print alignment stats
-            printcommand = "cat {}.bowtielog".format(run_name)
+            printcommand = "cat {}".format(bowtielog)
             printcommand_proc = subprocess.Popen(['bash', '-c', printcommand], stdout=subprocess.PIPE)
             out, err = printcommand_proc.communicate()
-            print(out)
+            self.logger.info(out)
 
-    #create dictionary "map", that contains all IMGT/HLA-allele names as keys and the allele name (e.g. A*02:01:01) as value
-    #dictionary "readcount" is initialized with 0 for each allele
-    #dictionary "readspergroup" is initialized with 0 for each group (2digit, e.g. A*01)
-    #dictionary "allelesPerLocus" stores the number of alleles per locus.
+    
     def create_ref_dict(self, hlafasta, class1_list):
-        map = {}
+        """
+        Create dictionary 'hla_dict', that contains all IMGT/HLA-allele names as keys
+        and the allele name (e.g. A*02:01:01) as value:
+        dictionary 'readcount' is initialized with 0 for each allele
+        dictionary 'readspergroup' is initialized with 0 for each group (2digit, e.g. A*01)
+        dictionary 'allelesPerLocus' stores the number of alleles per locus.
+        """
+        
+        hla_dict = {}
         allelesPerLocus = {}
         readcount = {}
         readspergroup = {}
@@ -399,32 +433,22 @@ class Pipeline(object):
         for locus in class1_list:
             allelesPerLocus[locus] = 0
 
-        handle = open(hlafasta, "r")
-        for record in SeqIO.parse(handle, "fasta"):
-            l = record.description.split(' ')
-            hlapseudoname = l[0]
-            hlaallele = l[1]
-            locus = hlaallele.split('*')[0]
-            if locus in class1_list:
-                map[hlapseudoname] = hlaallele
-                readcount[hlaallele] = 0
-                readspergroup[hlaallele.split(":")[0]] = 0
-                allelesPerLocus[hlaallele.split('*')[0]] += 1
-        handle.close()
-        return (map, readcount, readspergroup)
+        with open(hlafasta) as handle:
+            for record in SeqIO.parse(handle, "fasta"):
+                l = record.description.split(' ')
+                hlapseudoname = l[0]
+                hlaallele = l[1]
+                locus = hlaallele.split('*')[0]
+                if locus in class1_list:
+                    hla_dict[hlapseudoname] = hlaallele
+                    readcount[hlaallele] = 0
+                    readspergroup[hlaallele.split(":")[0]] = 0
+                    allelesPerLocus[hlaallele.split('*')[0]] += 1
+        return (hla_dict, readcount, readspergroup)
 
-    #Open sam-file and count mappings for each allele 
-    def read_mapping(self, map, sam, readcount):
-        with open(sam) as samhandle:
-            for line in samhandle:
-                if line[0] != '@':
-                    l = line.split('\t')
-                    hla = l[2]
-                    readcount[map[hla]] += 1
-        return readcount
 
-    #predict HLA type 
-    def predict_HLA(self, sam, medians, output, medianflag, locus_list, hla_class, readcount, readspergroup, hla_classification): 
+    def predict_HLA(self, sam, medians, output, medianflag, locus_list, hla_class, readcount, readspergroup, hla_classification, ambiguityfile):
+        """Predict HLA type"""
         maxAlleles = {}
         maxkey = {}
         allele_dict = {}
@@ -533,166 +557,170 @@ class Pipeline(object):
                 else:
                     alleleCount[locus] = str(readcount[maxallelepergroup[maxkey[locus]]])
 
-        rstring = ""
-        numberArgs = 0
+        confidence_vals = []
         for locus in locus_list:
-            numberArgs += 3
-            rstring += "{} {} {} ".format(alleleCount[locus], alleleVector[locus], maxkey[locus])
-        #call R-script "commmand.R" to calculate the confidence of the top-scoring allele
-        cmd = "R --vanilla < {} --args {} {}".format(cfg.cmd_R, numberArgs, rstring)
-        print("CMD:", cmd)
-        routput = os.popen(cmd)
-        parseOutput = routput.read().split("\n")
+            allele_list = [float(x) for x in alleleVector[locus].rstrip(",").split(",")]
+            confidence_val = calculate_confidence(float(alleleCount[locus]), allele_list)
+            confidence_vals.append((maxkey[locus], confidence_val, 1 - confidence_val))
 
-        entries = []
-        for entry in parseOutput:
-            #if entry[0:3] == "[1]":
-            if entry.startswith("[1]"):
-                entries.append(str(entry[4:len(entry)]))
-		
         fourDigitString = ""
         if medianflag:
             iteration = 2
         else:
             iteration = 1
 
-        entryIndex = 1
+        self.logger.info("Determining 4 digits HLA type...")
         for locus in locus_list:
             if not allele_dict[locus] == "no":
-                fourDigitString += "{},{},".format(allele_dict[locus], fourdigits.determine_four_digits_main("{}.4digits{}{}".format(sam, locus, iteration), alleleVector[locus], self.run_name, hla_class, hla_classification))
+                fourDigitString += "{},{},".format(allele_dict[locus], fourdigits.determine_four_digits_main("{}.4digits{}{}".format(sam, locus, iteration), alleleVector[locus].rstrip(","), hla_class, hla_classification, ambiguityfile))
             else:
                 fourDigitString += "{},,,".format(allele_dict[locus])
-                if entries[entryIndex] != "NA":
-                    entries[entryIndex] = str(1 - float(entries[entryIndex]))
-            entryIndex += 2
-			
-        self.pred2file(entries, readspergroup_dict, output, allele_dict, hla_class, locus_list)
+
+        self.pred2file(confidence_vals, readspergroup_dict, output, allele_dict, hla_class, locus_list)
         return fourDigitString
 	
-    #write digital haplotype into file
+
     def pred2file(self, entries, readspergroup_dict, output, allele_dict, HLAclass, locus_list):
-        out = open(output, 'w')
-        out.write("HLA\tHLA1\tmedian-Value\talternative\tp-Value\n")
-        index = 0
-        for locus in locus_list:
-            out.write("{}\t{}\t".format(locus, allele_dict[locus]))
-            #compute the decision threshold (median) for homozygosity vs. heterozygosity for the second iteration
-            print(readspergroup_dict)
-            out.write("{}\t".format(np.median(list(readspergroup_dict[locus].values()))))
-            out.write("{}\t{}\n".format(entries[index], entries[index+1]))
-            index += 2
+        """Write digital haplotype into file"""
+        self.logger.info("Writing prediction to file (file={}).".format(output))
+        with open(output, 'w') as outf:
+            outf.write("HLA\tHLA1\tmedian-Value\talternative\tp-Value\n")
+            index = 0
+            for locus in locus_list:
+                outf.write("{}\t{}\t".format(locus, allele_dict[locus]))
+                #compute the decision threshold (median) for homozygosity vs. heterozygosity for the second iteration
+                outf.write("{}\t".format(np.median(list(readspergroup_dict[locus].values()))))
+                outf.write("{}\t{}\n".format(entries[index][0], entries[index][2]))
+                index += 1
 
-        out.close()
-        print("The digital haplotype is written into {}".format(output))
+        self.logger.info("The digital haplotype is written into {}".format(output))
 
-    #open mapping file and all read ids to the list "removeList", which map to one of the three groups in "alleles"
-    def create_remove_list(self, run_name, map, locus_list):
+
+    def create_remove_list(self, sam, output, hla_dict, locus_list):
+        """
+        Open mapping file and all read ids to the list 'removeList',
+        which map to one of the three groups in 'alleles'
+        """
         removeList = {}
         alleles = []
-        sam = "{}-iteration1.sam".format(run_name)
-        alleles_in = "{}.digitalhaplotype1".format(run_name)
         line = 2
         for locus in locus_list:
-            alleles.append(linecache.getline(alleles_in, line).split('\t', 2)[1])
+            alleles.append(linecache.getline(output, line).split('\t', 2)[1])
             line += 1
-
-        with open(sam) as samhandle:
-            for line in samhandle:
-              if line[0] != '@':
-                    illuminaid = line.split("\t")[0]
-                    hlapseudoname = line.split("\t")[2]
-                    if map[hlapseudoname].split(':')[0] in alleles:
-                        removeList[illuminaid] = 1
-        return removeList
-
-    #open mapping file and all read ids to the list "removeList", which map to one of the three four-digit alleles in "alleles"
-    def create_remove_list_four_digits(self, run_name, map, fourdigits1_dict):
-        removeList = {}
-        sam = "{}-iteration1.sam".format(run_name)
 
         with open(sam) as samhandle:
             for line in samhandle:
                 if line[0] != '@':
                     illuminaid = line.split("\t")[0]
                     hlapseudoname = line.split("\t")[2]
-                    fourdigits = map[hlapseudoname].split(':')[0]+":"+map[hlapseudoname].split(':')[1]
+                    if hla_dict[hlapseudoname].split(':')[0] in alleles:
+                        removeList[illuminaid] = 1
+        return removeList
+
+
+    def create_remove_list_four_digits(self, sam, hla_dict, fourdigits1_dict):
+        """
+        Open mapping file and all read ids to the list 'removeList',
+        which map to one of the three four-digit alleles in 'alleles'.
+        """
+        removeList = {}
+
+        with open(sam) as samhandle:
+            for line in samhandle:
+                if line[0] != '@':
+                    illuminaid = line.split("\t")[0]
+                    hlapseudoname = line.split("\t")[2]
+                    fourdigits = hla_dict[hlapseudoname].split(':')[0]+":"+hla_dict[hlapseudoname].split(':')[1]
                     if fourdigits in fourdigits1_dict:
                         removeList[illuminaid] = 1
-        return removeList	
-	
-    #Remove reads that mapped to the three top-scoring alleles and write the remaining reads into two new read files
-    def remove_reads(self, run_name, removeList):
-        aligned1 = "{}_1.aligned".format(run_name)
-        aligned2 = "{}_2.aligned".format(run_name)
-        newReadFile1 = "{}-2nditeration_1.fq".format(run_name)
-        newReadFile2 = "{}-2nditeration_2.fq".format(run_name)
+        return removeList
+
+
+    def remove_reads(self, fq1, fq2, al1, al2, removeList):
+        """
+        Remove reads that mapped to the three top-scoring alleles
+        and write the remaining reads into two new read files.
+        """
         #r1 and r2, which are the input of bowtie in the 2nd iteration
-        r1 = open(newReadFile1, "w")
-        r2 = open(newReadFile2, "w")
+        r1 = open(fq1, "w")
+        r2 = open(fq2, "w")
         #open the 2 files, that contain the reads that mapped in the 1st iteration
-        aligned_handle1 = open(aligned1, "r")
-        aligned_handle2 = open(aligned2, "r")
+        aligned_handle1 = open(al1, "r")
+        aligned_handle2 = open(al2, "r")
 	
         #One read entry consists of 4 lines: header, seq, "+", qualities.
         for record in SeqIO.parse(aligned_handle1, "fastq"):
-            illuminaid = record.id.split('/')[0].split(' ')[0]#find exact id, which also appears in the mapping file
+            #find exact id, which also appears in the mapping file
+            illuminaid = record.id.split('/')[0].split(' ')[0]
             if not illuminaid in removeList:
                 SeqIO.write(record, r1, "fastq")
 	
         for record in SeqIO.parse(aligned_handle2, "fastq"):
-            illuminaid = record.id.split('/')[0].split(' ')[0]#find exact id, which also appears in the mapping file
+            #find exact id, which also appears in the mapping file
+            illuminaid = record.id.split('/')[0].split(' ')[0]
             if not illuminaid in removeList:
                 SeqIO.write(record, r2, "fastq")
 
-    #write the final prediction (both digital haplotypes) to file and stdout
+                
     def report_HLA_genotype(self, output1, output2, finaloutput, locus_list):
+        """Write the final prediction (both digital haplotypes) to file and stdout."""
         filehandle1 = open(output1, "r").readlines()[1:len(locus_list)+1]
         filehandle2 = open(output2, "r").readlines()[1:len(locus_list)+1]
-        outfile = open(finaloutput, "w")
-        outfile.write("#Locus\tAllele 1\tConfidence\tAllele 2\tConfidence\n")
+        with open(finaloutput, "w") as outfile:
+            outfile.write("#Locus\tAllele 1\tConfidence\tAllele 2\tConfidence\n")
 	
-        for i in range(len(filehandle1)):
-            filehandle1[i] = filehandle1[i][0:-1]
-        for i in range(len(filehandle2)):
-            filehandle2[i] = filehandle2[i][0:-1]
-        print("-----------2 digit typing results-------------")
-        print("#Locus\tAllele 1\tConfidence\tAllele 2\tConfidence")
-        line = 0
-        for locus in locus_list:
-            allele1 = filehandle1[line].split('\t', 2)[1]
-            allele1_score = filehandle1[line].split('\t')[4]
-            allele2 = filehandle2[line].split('\t', 2)[1]
-            if allele2 == "no":
-                allele2 = "hoz("+filehandle2[line].split('\t')[3]+")"
-            allele2_score = filehandle2[line].split('\t')[4]
-            line += 1
-            #write complete HLA genotype to file
-            outfile.write("{}\t{}\t{}\t{}\t{}\n".format(locus, allele1, allele1_score, allele2, allele2_score))
+            for i in range(len(filehandle1)):
+                filehandle1[i] = filehandle1[i][0:-1]
+            for i in range(len(filehandle2)):
+                filehandle2[i] = filehandle2[i][0:-1]
+            self.logger.info("-----------2 digit typing results-------------")
+            self.logger.info("#Locus\tAllele 1\tConfidence\tAllele 2\tConfidence")
+            line = 0
+            for locus in locus_list:
+                allele1 = filehandle1[line].split('\t', 2)[1]
+                allele1_score = filehandle1[line].split('\t')[4]
+                allele2 = filehandle2[line].split('\t', 2)[1]
+                if allele2 == "no":
+                    allele2 = "hoz("+filehandle2[line].split('\t')[3]+")"
+                allele2_score = filehandle2[line].split('\t')[4]
+                line += 1
+                #write complete HLA genotype to file
+                outfile.write("{}\t{}\t{}\t{}\t{}\n".format(
+                    locus,
+                    allele1,
+                    allele1_score,
+                    allele2,
+                    allele2_score
+                ))
 
-            #.. and print it to STDOUT
-            print("{}\t{}\t{}\t{}\t{}".format(locus, allele1, allele1_score, allele2, allele2_score))
-        outfile.close()
+                #.. and print it to STDOUT
+                self.logger.info("{}\t{}\t{}\t{}\t{}".format(
+                    locus,
+                    allele1,
+                    allele1_score,
+                    allele2,
+                    allele2_score
+                ))
+
 
     def report_HLA_four_digit_genotype(self, finalAlleles, finaloutput4digit, locus_list):
-	#write complete HLA genotype at four-digit-level to file
+
+        """Write complete HLA genotype at four-digit-level to file."""
+        
         with open(finaloutput4digit, "w") as outfile:
             outfile.write("#Locus\tAllele 1\tConfidence\tAllele 2\tConfidence\n")
             #.. and print it to STDOUT
-            print("-----------4 digit typing results-------------")
-            print("#Locus\tAllele 1\tConfidence\tAllele 2\tConfidence")
+            self.logger.info("-----------4 digit typing results-------------")
+            self.logger.info("#Locus\tAllele 1\tConfidence\tAllele 2\tConfidence")
             for locus in locus_list:
                 outfile.write("{}\t{}\n".format(locus, finalAlleles[locus]))
-                print("{}\t{}".format(locus, finalAlleles[locus]))
-	
-    #calculate locus-specific expression
-    def expression(self, locus_list, length_dict, map, run_name):
-        outfile = open("{}.expression".format(run_name), 'w')
-        aligned1 = "{}_1.aligned".format(run_name)
-        sam = "{}-iteration1.sam".format(run_name)
-        logfile = "{}.bowtielog".format(run_name)
-        print(logfile)
+                self.logger.info("{}\t{}".format(locus, finalAlleles[locus]))
+
+
+    def expression(self, aligned, sam, logfile, alleles_in, locus_list, length_dict, hla_dict):
+        """Calculate locus-specific expression."""
         totalreads = float(linecache.getline(logfile, 1).split(':')[1])
-        alleles_in = "{}.digitalhaplotype1".format(run_name)
+
         alleles = []
         line = 2
         for locus in locus_list:
@@ -702,19 +730,19 @@ class Pipeline(object):
 	
         #create read dictionary
         reads = {}
-        aligned_handle1 = open(aligned1, "r")
-        for record in SeqIO.parse(aligned_handle1, "fastq"):
-            illuminaid = record.id.split('/')[0].split(' ')[0]#find exact id, which also appears in the mapping file
-            reads[illuminaid] = {}
-            for locus in locus_list:
-                reads[illuminaid][locus] = 0
-        samhandle = open(sam, "r")
-        for line in samhandle:
-            if line[0] != '@':
-                illuminaid = line.split("\t")[0].split('/')[0].split(' ')[0]
-                hlapseudoname = line.split("\t")[2]
-                if map[hlapseudoname].split(':')[0] in alleles:
-                    reads[illuminaid][map[hlapseudoname].split('*')[0]] += 1
+        with open(aligned) as aligned_handle1:
+            for record in SeqIO.parse(aligned_handle1, "fastq"):
+                illuminaid = record.id.split('/')[0].split(' ')[0]#find exact id, which also appears in the mapping file
+                reads[illuminaid] = {}
+                for locus in locus_list:
+                    reads[illuminaid][locus] = 0
+        with open(sam) as samhandle:
+            for line in samhandle:
+                if line[0] != '@':
+                    illuminaid = line.split("\t")[0].split('/')[0].split(' ')[0]
+                    hlapseudoname = line.split("\t")[2]
+                    if hla_dict[hlapseudoname].split(':')[0] in alleles:
+                        reads[illuminaid][hla_dict[hlapseudoname].split('*')[0]] += 1
         count = {}
         for locus in locus_list:
             count[locus] = 0
@@ -728,60 +756,38 @@ class Pipeline(object):
                     count[locus] += float(1.0 / float(n))
 	
         #Calculate RPKM and print expression values for each locus to stdout
-        for locus in count:
-            rpkm = float((1000.0 / length_dict[locus])) * float((1000000.0 / totalreads)) * count[locus]
-            print("{}: {} RPKM".format(locus, rpkm))
-            outfile.write("{}: {} RPKM\n".format(locus, rpkm))
-        outfile.close()
+        with open(os.path.join(self.working_dir, "hla.expression"), 'w') as outf:
+            for locus in count:
+                rpkm = float((1000.0 / length_dict[locus])) * float((1000000.0 / totalreads)) * count[locus]
+                self.logger.info("{}: {} RPKM".format(locus, rpkm))
+                outf.write("{}: {} RPKM\n".format(locus, rpkm))
 
-    #In case of ambiguous typings, the allele(s) with the best p-value (which is actually the smallest one, so the name of the function is misleading - sorry) is reported and thus the min(p) is returned
-    def get_max_P(self, file):
-        p = []
-        with open(file) as inf:
-            for line in inf:
-                if not line[0] == "#":
-                    if line.split("\t")[1][0:-1]=="NA":
-                        return "NA"
-                    p.append(float(line.split("\t")[1][0:-1]))
-        try:
-            return min(p)
-        except ValueError:
-            return "NA"
-
-    #Return the p value of a prediction, which is stored in the intermediate textfile
-    def get_P(self, locus, finaloutput):
-        if locus == "A" or locus == "DQA1" or locus == "E":
-            p = linecache.getline(finaloutput, 2).split('\t')[4]
-        elif locus == "B" or locus == "DQB1" or locus == "F":
-            p = linecache.getline(finaloutput, 3).split('\t')[4]
-        elif locus == "C" or locus == "DRB1" or locus == "G":
-            p = linecache.getline(finaloutput, 4).split('\t')[4]
-        elif locus == "H" or locus == "DRA":
-            p = linecache.getline(finaloutput, 5).split('\t')[4]
-        elif locus == "J" or locus == "DPA1":
-            p = linecache.getline(finaloutput, 6).split('\t')[4]
-        elif locus == "K" or locus == "DPB1":
-            p = linecache.getline(finaloutput, 7).split('\t')[4]
-        elif locus == "L":
-            p = linecache.getline(finaloutput, 8).split('\t')[4]
-        elif locus == "P":
-            p = linecache.getline(finaloutput, 9).split('\t')[4]
-        elif locus == "V":
-            p = linecache.getline(finaloutput, 10).split('\t')[4]
-        return p[0:-1]
-	
 
 def main():
     parser = ArgumentParser(description="Predict HLA type of paired-end FASTQs")
-    parser.add_argument("-1", "--fq1", dest="fq1", help="Specify first FASTQ file", required=True)
-    parser.add_argument("-2", "--fq2", dest="fq2", help="Specify second FASTQ file", required=True)
-    parser.add_argument("-r", "--run_name", dest="run_name", help="Specify run name", default="run")
-    parser.add_argument("-p", "--threads", dest="threads", type=int, help="Specify number of threads", default=1)
-    parser.add_argument("-3", "--trim3", dest="trim3", type=int, help="Specify trimming cutoff for the low quality end. Bowtie option: -3 <int> trims <int> bases from the low quality 3' end of each read. Default: 0", default=0)
+    parser.add_argument("-1", "--fq1", dest="fq1",
+                        help="Specify first FASTQ file. Gzipped input supported.",
+                        required=True)
+    parser.add_argument("-2", "--fq2", dest="fq2",
+                        help="Specify second FASTQ file. Gzipped input supported.",
+                        required=True)
+    parser.add_argument("-o", "--working_dir", dest="working_dir",
+                        help="Specify working dir. Results will be saved into this folder",
+                        default=".")
+    parser.add_argument("-p", "--threads", dest="threads", type=int,
+                        help="Specify number of threads to be used by bowtie",
+                        default=1)
+    parser.add_argument("-3", "--trim3", dest="trim3", type=int,
+                        help="Specify trimming cutoff for the low quality end. Bowtie option: -3 <int> trims <int> bases from the low quality 3' end of each read. Default: 0",
+                        default=0)
+    parser.add_argument("-V", "--version", action="version",
+                        version="seq2HLA version {}".format(version),
+                        help="show the version number and exit")
+
 
     args = parser.parse_args()
 
-    pipe = Pipeline(args.run_name, args.fq1, args.fq2, args.trim3, args.threads)
+    pipe = Pipeline(args.working_dir, args.fq1, args.fq2, args.trim3, args.threads)
 
     pipe.run()
 

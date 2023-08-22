@@ -8,5 +8,5 @@ dependencies:
   - biopython=1.79
   - bowtie=1.0.0
   - numpy=1.21.5
+  - scipy=1.7.3
   - python=3.7.16
-  - r-base=4.2.3

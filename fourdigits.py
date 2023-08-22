@@ -1,20 +1,23 @@
 
+import hashlib
 import os
 import sys
 
 
 import numpy as np
 
+from confidence import calculate_confidence
 import config as cfg
 
 """
 Determination of the 4-digit HLA type based on the 2-digit determination by seq2HLA.py
 """
 
+top_alleles = {}
 
-def determine_four_digits_main(infile, bgVec, run_name, hla_class, hla_classification):
+def determine_four_digits_main(infile, bgVec, hla_class, hla_classification, ambiguityfile):
     if hla_classification == "nonclassical":
-        result = determine_four_digits_minor_alleles(infile, bgVec, run_name)
+        result = determine_four_digits_minor_alleles(infile, bgVec, ambiguityfile)
     else:
         dbmhc_file = ""
         dbmhc = []
@@ -23,7 +26,7 @@ def determine_four_digits_main(infile, bgVec, run_name, hla_class, hla_classific
         else:
             dbmhc_file = cfg.dbmhc_II
         dbmhc = create_db_mhc_dict(dbmhc, dbmhc_file)
-        result = determine_four_digits(dbmhc, infile, bgVec, run_name)
+        result = determine_four_digits(dbmhc, infile, bgVec, ambiguityfile)
     return result
 	
 
@@ -46,14 +49,15 @@ def create_db_mhc_dict(dbmhc, dbmhc_file):
 				
     return dbmhc
 
+
 def mean_pan_pop_freq(freq_dict):
     pan_list = []
     for entry in freq_dict:
         pan_list.append(float(freq_dict[entry]))
     return np.mean(pan_list)
-	
-def determine_four_digits(dbmhc, infile, bgVec, run_name):
-    
+
+
+def determine_four_digits(dbmhc, infile, bgVec, ambiguityfile):    
     result_dict = {}
     result_dict2 = {}
     readcount = []
@@ -77,22 +81,16 @@ def determine_four_digits(dbmhc, infile, bgVec, run_name):
     top = readcount[0]
     readcount_copy = readcount[1:]
     readcount_copy_str = str(readcount_copy)[1:-1].replace(" ","")
-	
-    #call R-script "commmand_fourdigit.R" to calculate the confidence of the top-scoring allele (four-digits)
-    routput = os.popen("R --vanilla < {0} --args {1} {1},{2}".format(cfg.cmd_fourdigit, top, readcount_copy_str)).read()
-    parseOutput = routput.split("\n")
 
-    entries = []
+    confidence = calculate_confidence(top, readcount)
+
     repeat = True
-    for entry in parseOutput:
-        if entry[0:3] == "[1]":
-            entries.append(str(entry[4:len(entry)]))
-	#print entries[0]
-    if not entries[0] == "NA":
-        if float(entries[0]) < 0.001 and float(entries[0]) > 0.0:
+
+    if confidence:
+        if 0.0 < confidence < 0.001:
             for item in result_dict:
                 if result_dict[item] == top:
-                    writehandle.write("{}\t{}\n".format(item, calculate_outlier(result_dict[item], bgVec)))
+                    writehandle.write("{}\t{}\n".format(item, 1 - calculate_outlier(result_dict[item], bgVec)))
                     repeat = False
                     mostProbableAllele = str(item.split(":")[0]) + ":" + str(item.split(":")[1])
                     numbersolutions = 1
@@ -115,7 +113,7 @@ def determine_four_digits(dbmhc, infile, bgVec, run_name):
             count = 0
             for item in result_dict:
                 if result_dict[item] >= perc:
-                    writehandle.write("{}\t{}\n".format(item, calculate_outlier(result_dict[item], bgVec)))
+                    writehandle.write("{}\t{}\n".format(item, 1 - calculate_outlier(result_dict[item], bgVec)))
                     repeat = False
                     item_split = item.split(":")
                     mostProbableAllele = "{}:{}".format(item_split[0], item_split[1])
@@ -135,7 +133,7 @@ def determine_four_digits(dbmhc, infile, bgVec, run_name):
                     #for item in result_dict:
                     for item in result_dict2:
                         item_split = item.split(":")
-                        writehandle.write("{}\t{}\n".format(item, calculate_outlier(result_dict2[item], bgVec)))
+                        writehandle.write("{}\t{}\n".format(item, 1 - calculate_outlier(result_dict2[item], bgVec)))
                         repeat = False
                         mostProbableAllele = "{}:{}".format(item_split[0], item_split[1])
                         numbersolutions = 1
@@ -154,12 +152,12 @@ def determine_four_digits(dbmhc, infile, bgVec, run_name):
                         if result_dict2[item] > max:
                             max = result_dict2[item]
                             mostProbableAllele = item4digit
-                        ambiguity_handle = open("{}.ambiguity".format(run_name), "a")
+                        ambiguity_handle = open(ambiguityfile, "a")
                         ambiguity_handle.write("#################################################################################################\n")
                         ambiguity_handle.write("#Ambiguity:\n")
                         ambiguity_handle.write("#Based on the RNA-Seq reads and the dbMHC table, the following 4-digits alleles are possible:\n")
                         for ambi4DigitAllele in ambiguity_dict:
-                            ambiguity_handle.write("{}\t{}\n".format(ambi4DigitAllele, calculate_outlier(ambiguity_dict[ambi4DigitAllele], bgVec)))
+                            ambiguity_handle.write("{}\t{}\n".format(ambi4DigitAllele, 1 - calculate_outlier(ambiguity_dict[ambi4DigitAllele], bgVec)))
 				
                         ambiguity_handle.write("#However, by taking into account the read data, the most probable 4-digit allele is:\n")
                         ambiguity_handle.write("{}\n\n".format(mostProbableAllele))
@@ -169,25 +167,28 @@ def determine_four_digits(dbmhc, infile, bgVec, run_name):
                             item_split = item.split(":")
                             item4digit = "{}:{}".format(item_split[0], item_split[1])
                             if result_dict2[item] == max:
-                                writehandle.write("{}\t{}\n".format(item, calculate_outlier(result_dict2[item], bgVec)))
+                                writehandle.write("{}\t{}\n".format(item, 1 - calculate_outlier(result_dict2[item], bgVec)))
                                 repeat = False
-    writehandle.close()			
+    writehandle.close()
     return "{},{}".format(mostProbableAllele, numbersolutions)
 	
 def calculate_outlier(top, bgVec):
-    #call R-script "commmand_fourdigit.R" to calculate the confidence of the top-scoring allele (four-digits)
-    routput = os.popen("R --vanilla < {} --args {} {}".format(cfg.cmd_fourdigit, top, bgVec)).read()
-    parseOutput = routput.split("\n")
-	
-    entries = []
-    repeat = 1
-    for entry in parseOutput:
-        if entry[0:3] == "[1]":
-            entries.append(str(entry[4:len(entry)]))
-    return entries[0]
+    """Call R-script "commmand_fourdigit.R" to calculate the confidence of the top-scoring allele (four-digits)."""
+
+    # Convert bgVec into md5
+    md5sum = hashlib.md5(bgVec.encode("utf-8")).hexdigest()
+    if not md5sum in top_alleles:
+        top_alleles[md5sum] = {}
+    if top in top_alleles[md5sum]:
+        return top_alleles[md5sum][top]
+    else:
+        allele_list = [float(x) for x in bgVec.rstrip(",").split(",")]
+        confidence = calculate_confidence(float(top), allele_list)
+        top_alleles[md5sum][top] = confidence
+        return confidence
 
 #method for determining the 4 digit HLA type for minor HLA alleles, for which no entry in dbMHC is available
-def determine_four_digits_minor_alleles(infile, bgVec, run_name):
+def determine_four_digits_minor_alleles(infile, bgVec, ambiguityfile):
 	
     result_dict = {}
     result_dict2 = {}
@@ -213,21 +214,14 @@ def determine_four_digits_minor_alleles(infile, bgVec, run_name):
     readcount_copy = readcount[1:]
     readcount_copy_str = str(readcount_copy)[1:-1].replace(" ","")
 	
-    #call R-script "commmand_fourdigit.R" to calculate the confidence of the top-scoring allele (four-digits)
-    routput = os.popen("R --vanilla < {0} --args {1} {1},{2}".format(cfg.cmd_fourdigit, top, top, readcount_copy_str)).read()
-    parseOutput = routput.split("\n")
-
-    entries = []
+    confidence = calculate_confidence(top, readcount)
     repeat = True
-    for entry in parseOutput:
-        if entry[0:3] == "[1]":
-            entries.append(str(entry[4:len(entry)]))
-    #print entries[0]
-    if not entries[0] == "NA":
-        if float(entries[0]) < 0.001 and float(entries[0]) > 0.0:
+
+    if confidence:
+        if 0.0 < confidence < 0.001:
             for item in result_dict:
                 if result_dict[item] == top:
-                    writehandle.write("{}\t{}\n".format(item, calculate_outlier(result_dict[item], bgVec)))
+                    writehandle.write("{}\t{}\n".format(item, 1 - calculate_outlier(result_dict[item], bgVec)))
                     repeat = False
                     item_split = item.split(":")
                     mostProbableAllele = "{}:{}".format(item_split[0], item_split[1])
@@ -251,7 +245,7 @@ def determine_four_digits_minor_alleles(infile, bgVec, run_name):
             count = 0
             for item in result_dict:
                 if result_dict[item] >= perc:
-                    writehandle.write("{}\t{}\n".format(item, calculate_outlier(result_dict[item], bgVec)))
+                    writehandle.write("{}\t{}\n".format(item, 1 - calculate_outlier(result_dict[item], bgVec)))
                     repeat = False
                     item_split = item.split(":")
                     mostProbableAllele = "{}:{}".format(item_split[0], item_split[1])
@@ -270,7 +264,7 @@ def determine_four_digits_minor_alleles(infile, bgVec, run_name):
             if len(set(result)) == 1:
                 #for item in result_dict:
                 for item in result_dict2:
-                    writehandle.write("{}\t{}\n".format(item, calculate_outlier(result_dict2[item], bgVec)))
+                    writehandle.write("{}\t{}\n".format(item, 1 - calculate_outlier(result_dict2[item], bgVec)))
                     repeat = False
                     item_split = item.split(":")
                     mostProbableAllele = "{}:{}".format(item_split[0], item_split[1])
@@ -295,12 +289,12 @@ def determine_four_digits_minor_alleles(infile, bgVec, run_name):
                         #if np.mean(dbmhc_prob[item4digit]) > max:
                         #	max = np.mean(dbmhc_prob[item4digit])
                         #	mostProbableAllele=item4digit
-                        ambiguity_handle = open("{}.ambiguity".format(run_name), "a")
+                        ambiguity_handle = open(ambiguityfile, "a")
                         ambiguity_handle.write("#################################################################################################\n")
                         ambiguity_handle.write("#Ambiguity:\n")
                         ambiguity_handle.write("#Based on the RNA-Seq reads and the dbMHC table, the following 4-digits alleles are possible:\n")
                         for ambi4DigitAllele in ambiguity_dict:
-                            ambiguity_handle.write("{}\t{}\n".format(ambi4DigitAllele, calculate_outlier(ambiguity_dict[ambi4DigitAllele], bgVec)))
+                            ambiguity_handle.write("{}\t{}\n".format(ambi4DigitAllele, 1 - calculate_outlier(ambiguity_dict[ambi4DigitAllele], bgVec)))
                             
                         ambiguity_handle.write("#However, by taking into account the read data, the most probable 4-digit allele is:\n")
                         ambiguity_handle.write("{}\n\n".format(mostProbableAllele))
@@ -312,7 +306,7 @@ def determine_four_digits_minor_alleles(infile, bgVec, run_name):
                             #if np.mean(dbmhc_prob[item4digit]) == max:
                             #if meanPanPopFreq(dbmhc_prob[item4digit]) == max:
                             if result_dict2[item] == max:
-                                writehandle.write("{}\t{}\n".format(item, calculate_outlier(result_dict2[item], bgVec)))
+                                writehandle.write("{}\t{}\n".format(item, 1 - calculate_outlier(result_dict2[item], bgVec)))
                                 repeat = False
     writehandle.close()			
     return "{},{}".format(mostProbableAllele, numbersolutions)
