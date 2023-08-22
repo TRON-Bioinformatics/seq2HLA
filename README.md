@@ -4,16 +4,6 @@ We developed an in-silico method "Seq2HLA", written in python and R, which takes
 as input, uses a bowtie index comprising all HLA alleles and outputs the most likely HLA class I and class II genotypes (in 4 digit resolution), a p-value for each call, and the expression of each class.
 
 
-## Author
-Sebastian Boegel, 2012 - 2014 (c)
-TRON - Translational Oncology at the University Medical Center Mainz, 55131 Mainz, Germany
-University Medical Center of the Johannes Gutenberg-University Mainz, III.  Medical Department, Mainz, Germany
-
-
-## Contact
-boegels@uni-mainz.de
-
-
 ## Dependencies
 
 - Python (3.7.16)
