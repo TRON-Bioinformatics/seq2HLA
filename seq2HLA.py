@@ -26,8 +26,9 @@ import numpy as np
 
 # Internal modules
 import config as cfg
-from confidence import calculate_confidence
-import fourdigits
+
+from determine_hla import calculate_confidence
+from determine_hla import determine_four_digits_main
 from version import version
 
 
@@ -55,8 +56,11 @@ def get_read_len(fq_file, gzipped):
     return read_len
 
 
-#Return the p value of a prediction, which is stored in the intermediate textfile
+
 def get_P(locus, finaloutput):
+    """
+    Return the p value of a prediction, which is stored in the intermediate textfile.
+    """
     locus_dict = {
         "A": 2, "DQA1": 2, "E": 2,
         "B": 3, "DQB1": 3, "F": 3,
@@ -214,7 +218,6 @@ class Pipeline(object):
         )
 
 
-    #---------------Class I-------------------------------
     def call_HLA(self, bowtiebuild, hla1fasta, mapopt, locus_list, hla_class, hla_classification, length_dict):
         """This method calls HLA types for class I."""
         twodigits1 = {}
@@ -227,7 +230,6 @@ class Pipeline(object):
         twodigits3 = {}
         finalAlleles = {}
 
-        #-------1st iteration-----------------------------------
         if hla_class == 1:
             self.logger.info("----------HLA class I------------")
             if hla_classification == "classical":
@@ -239,7 +241,6 @@ class Pipeline(object):
         prefix = "hla_{}_{}".format(hla_class, hla_classification)
 
         
-        #iteration = 1
         fq1_2 = os.path.join(self.working_dir, "{}_iteration_2_1.fq".format(prefix))
         fq2_2 = os.path.join(self.working_dir, "{}_iteration_2_2.fq".format(prefix))
         sam1 = os.path.join(self.working_dir, "{}_iteration_1.sam".format(prefix))
@@ -281,7 +282,6 @@ class Pipeline(object):
         self.logger.info("Starting 2nd iteration:")
         self.logger.info("Mapping reads...")
         medians = {}
-        #iteration = 2
         
         self.mapping(sam2, aligned, bowtielog, fq1_2, fq2_2, bowtiebuild, 2, mapopt)
 
@@ -302,9 +302,7 @@ class Pipeline(object):
         try:
             self.expression(aligned_1, sam1, expressionfile, bowtielog, output1, locus_list, length_dict, hla_dict)
         except IOError:
-            #tmp = ""
             for locus in locus_list:
-                #tmp += "{}: 0 RPKM\n".format(locus)
                 self.logger.debug("{}: 0 RPKM".format(locus))
 	
         #-----3rd iteration in case of at least one homozygous call-----------
@@ -387,7 +385,7 @@ class Pipeline(object):
                 finalAlleles[locus] = "no\tNA\tno\tNA"
             self.report_HLA_four_digit_genotype(finalAlleles, finaloutput4digit, locus_list)
 
-        #self.cleanup()
+        self.cleanup()
 
 
     def cleanup(self):
@@ -570,7 +568,7 @@ class Pipeline(object):
         for locus in locus_list:
             allele_list = [float(x) for x in alleleVector[locus]]
             confidence_val = calculate_confidence(float(alleleCount[locus]), allele_list)
-            confidence_vals.append((maxkey[locus], confidence_val, 1 - confidence_val))
+            confidence_vals.append((maxkey[locus], confidence_val))
 
         fourDigitString = ""
         if medianflag:
@@ -581,7 +579,7 @@ class Pipeline(object):
         self.logger.info("Determining 4 digits HLA type...")
         for locus in locus_list:
             if not allele_dict[locus] == "no":
-                fourDigitString += "{},{},".format(allele_dict[locus], fourdigits.determine_four_digits_main("{}.4digits{}{}".format(sam, locus, iteration), alleleVector[locus], hla_class, hla_classification, ambiguityfile))
+                fourDigitString += "{},{},".format(allele_dict[locus], determine_four_digits_main("{}.4digits{}{}".format(sam, locus, iteration), alleleVector[locus], hla_class, hla_classification, ambiguityfile))
             else:
                 fourDigitString += "{},,,".format(allele_dict[locus])
 
@@ -599,7 +597,7 @@ class Pipeline(object):
                 outf.write("{}\t{}\t".format(locus, allele_dict[locus]))
                 #compute the decision threshold (median) for homozygosity vs. heterozygosity for the second iteration
                 outf.write("{}\t".format(np.median(list(readspergroup_dict[locus].values()))))
-                outf.write("{}\t{}\n".format(entries[index][0], entries[index][2]))
+                outf.write("{}\t{}\n".format(entries[index][0], entries[index][1]))
                 index += 1
 
         self.logger.info("The digital haplotype is written into {}".format(output))
