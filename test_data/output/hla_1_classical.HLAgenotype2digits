@@ -1,0 +1,4 @@
+#Locus	Allele 1	Confidence	Allele 2	Confidence
+A	A*24	0.0009938365	A*02	0.0009960293
+B	B*35	0.02892281	B*15	0.0008318822
+C	C*04	3.766758e-07	hoz("C*03")	0.0651378

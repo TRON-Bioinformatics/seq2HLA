@@ -176,13 +176,13 @@ def calculate_outlier(top, bgVec):
     """Call R-script "commmand_fourdigit.R" to calculate the confidence of the top-scoring allele (four-digits)."""
 
     # Convert bgVec into md5
-    md5sum = hashlib.md5(bgVec.encode("utf-8")).hexdigest()
+    md5sum = hashlib.md5(','.join(str(x) for x in bgVec).encode("utf-8")).hexdigest()
     if not md5sum in top_alleles:
         top_alleles[md5sum] = {}
     if top in top_alleles[md5sum]:
         return top_alleles[md5sum][top]
     else:
-        allele_list = [float(x) for x in bgVec.rstrip(",").split(",")]
+        allele_list = [float(x) for x in bgVec]
         confidence = calculate_confidence(float(top), allele_list)
         top_alleles[md5sum][top] = confidence
         return confidence

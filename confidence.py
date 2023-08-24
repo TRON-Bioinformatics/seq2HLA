@@ -3,9 +3,14 @@
 import numpy as np
 import scipy.stats as st
 
+np.seterr("raise")
 
 def calculate_confidence(allele_count, allele_vector):
-    paril = 1.0 - st.norm.cdf(allele_count, np.mean(allele_vector), np.std(allele_vector, ddof = 1))
+    if not allele_vector or len(allele_vector) < 2:
+        return 1.0
+    mean = np.mean(allele_vector)
+    std = np.std(allele_vector, ddof = 1)
+    paril = 1.0 - st.norm.cdf(allele_count, mean, std)
     poutlier = st.binom.pmf(0, len(allele_vector), paril)
     return (1.0 - poutlier)
 
