@@ -10,7 +10,7 @@ as input, uses a bowtie index comprising all HLA alleles and outputs the most li
   - biopython (>= 1.79)
   - numpy (>= 1.21.5)
   - scipy (>= 1.7.3)
-- bowtie (>= 1.0.0)
+- bowtie (>= 1.3.1)
 
 
 ## Installation
@@ -50,13 +50,13 @@ optional arguments:
 ## Output
 
 The results are output to stdout and to textfiles. Most important are:
-- <prefix>-ClassI.HLAgenotype2digits => 2 digit result of Class I
-- <prefix>-ClassII.HLAgenotype2digits => 2 digit result of Class II
-- <prefix>-ClassI.HLAgenotype4digits => 4 digit result of Class I
-- <prefix>-ClassII.HLAgenotype4digits => 4 digit result of Class II
-- <prefix>.ambiguity => reports typing ambuigities (more than one solution for an allele possible)
-- <prefix>-ClassI.expression => expression of Class I alleles
-- <prefix>-ClassII.expression => expression of Class II alleles
+- `hla_1_*.HLAgenotype2digits` - 2 digit result of Class I
+- `hla_2_classical.HLAgenotype2digits` - 2 digit result of Class II
+- `hla_1_*.HLAgenotype4digits` - 4 digit result of Class I
+- `hla_2_classical.HLAgenotype4digits` - 4 digit result of Class II
+- `hla.ambiguity` - reports typing ambuigities (more than one solution for an allele possible)
+- `hla_1_*.expression` - expression of Class I alleles
+- `hla_2_classical.expression` - expression of Class II alleles
 
 
 ## Version history

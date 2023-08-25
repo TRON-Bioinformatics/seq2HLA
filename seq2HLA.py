@@ -12,7 +12,6 @@ __mail__ = "patrick.sorn@tron-mainz.de"
 
 
 from argparse import ArgumentParser
-from glob import glob
 import gzip
 import linecache
 import logging
@@ -27,8 +26,9 @@ import numpy as np
 
 # Internal modules
 import config as cfg
-from confidence import calculate_confidence
-import fourdigits
+
+from determine_hla import calculate_confidence
+from determine_hla import determine_four_digits_main
 from version import version
 
 
@@ -56,8 +56,11 @@ def get_read_len(fq_file, gzipped):
     return read_len
 
 
-#Return the p value of a prediction, which is stored in the intermediate textfile
+
 def get_P(locus, finaloutput):
+    """
+    Return the p value of a prediction, which is stored in the intermediate textfile.
+    """
     locus_dict = {
         "A": 2, "DQA1": 2, "E": 2,
         "B": 3, "DQB1": 3, "F": 3,
@@ -72,8 +75,12 @@ def get_P(locus, finaloutput):
     return linecache.getline(finaloutput, locus_dict[locus]).split("\t")[4][0:-1]
 
 
-#In case of ambiguous typings, the allele(s) with the best p-value (which is actually the smallest one, so the name of the function is misleading - sorry) is reported and thus the min(p) is returned
-def get_max_P(infile):
+
+def get_best_P(infile):
+    """
+    In case of ambiguous typings, the allele(s) with the best p-value
+    (which is actually the smallest one) is reported and thus the min(p) is returned.
+    """
     p = []
     with open(infile) as inf:
         for line in inf:
@@ -87,8 +94,30 @@ def get_max_P(infile):
         return "NA"
 
 
-#Open sam-file and count mappings for each allele 
+
+def get_best_allele_per_group(readspergroup, readcount):
+    """
+    For each allele, to which at least 1 read map, find the allele which has the most reads within a group (2-digit-level, e.g. A*02") and save
+    #i) the key of this allele as ambassador for the group => maxallelepergroup holds for each group the top-scoring allele
+    #ii) the number of reads mapping to the top-scoring allele => readspergroup
+    """
+
+    top_counts = {}
+    top_alleles = {}
+    for group in readspergroup:
+        top_counts[group] = readspergroup[group]
+    for key in readcount:
+        if readcount[key] > 0:
+            group = key.split(":")[0]
+            if top_counts[group] <= readcount[key]:
+                top_counts[group] = readcount[key]
+                top_alleles[group] = key
+    return (top_counts, top_alleles)
+
+
+
 def parse_mapping(hla_dict, sam, readcount):
+    """Open sam-file and count mappings for each allele."""
     with open(sam) as samhandle:
         for line in samhandle:
             if line[0] != '@':
@@ -189,7 +218,6 @@ class Pipeline(object):
         )
 
 
-    #---------------Class I-------------------------------
     def call_HLA(self, bowtiebuild, hla1fasta, mapopt, locus_list, hla_class, hla_classification, length_dict):
         """This method calls HLA types for class I."""
         twodigits1 = {}
@@ -202,7 +230,6 @@ class Pipeline(object):
         twodigits3 = {}
         finalAlleles = {}
 
-        #-------1st iteration-----------------------------------
         if hla_class == 1:
             self.logger.info("----------HLA class I------------")
             if hla_classification == "classical":
@@ -214,7 +241,6 @@ class Pipeline(object):
         prefix = "hla_{}_{}".format(hla_class, hla_classification)
 
         
-        #iteration = 1
         fq1_2 = os.path.join(self.working_dir, "{}_iteration_2_1.fq".format(prefix))
         fq2_2 = os.path.join(self.working_dir, "{}_iteration_2_2.fq".format(prefix))
         sam1 = os.path.join(self.working_dir, "{}_iteration_1.sam".format(prefix))
@@ -229,6 +255,7 @@ class Pipeline(object):
         output3 = os.path.join(self.working_dir, "{}.digitalhaplotype3".format(prefix))
         medianfile = os.path.join(self.working_dir, "{}.digitalhaplotype1".format(prefix))
         ambiguityfile = os.path.join(self.working_dir, "hla.ambiguity")
+        expressionfile = os.path.join(self.working_dir, "{}.expression".format(prefix))
         finaloutput = os.path.join(self.working_dir, "{}.HLAgenotype2digits".format(prefix))
         finaloutput4digit = os.path.join(self.working_dir, "{}.HLAgenotype4digits".format(prefix))
         
@@ -255,7 +282,6 @@ class Pipeline(object):
         self.logger.info("Starting 2nd iteration:")
         self.logger.info("Mapping reads...")
         medians = {}
-        #iteration = 2
         
         self.mapping(sam2, aligned, bowtielog, fq1_2, fq2_2, bowtiebuild, 2, mapopt)
 
@@ -274,11 +300,9 @@ class Pipeline(object):
         self.report_HLA_genotype(output1, output2, finaloutput, locus_list)
         self.logger.info("Calculating locus-specific expression...")
         try:
-            self.expression(aligned_1, sam1, bowtielog, output1, locus_list, length_dict, hla_dict)
+            self.expression(aligned_1, sam1, expressionfile, bowtielog, output1, locus_list, length_dict, hla_dict)
         except IOError:
-            #tmp = ""
             for locus in locus_list:
-                #tmp += "{}: 0 RPKM\n".format(locus)
                 self.logger.debug("{}: 0 RPKM".format(locus))
 	
         #-----3rd iteration in case of at least one homozygous call-----------
@@ -324,7 +348,7 @@ class Pipeline(object):
                 if fourDigit_solutions1[locus]:
                     if int(fourDigit_solutions1[locus]) > 1:
                         allele1 += "'"
-                    finalAlleles[locus] = "{}\t{}\t".format(allele1, get_max_P("{}.4digits{}1.solutions".format(sam1, locus)))
+                    finalAlleles[locus] = "{}\t{}\t".format(allele1, get_best_P("{}.4digits{}1.solutions".format(sam1, locus)))
                 else:
                     finalAlleles[locus] = "no\tNA\t"
 	
@@ -343,13 +367,13 @@ class Pipeline(object):
                         allele3 = f3[alleleFourDigit_index]
                         if int(f3[alleleFourDigit_index+1]) > 1:
                             allele3 += "'"
-                        finalAlleles[locus] += "{}\t{}".format(allele3, get_max_P("{}.4digits{}2.solutions".format(sam3, locus)))
+                        finalAlleles[locus] += "{}\t{}".format(allele3, get_best_P("{}.4digits{}2.solutions".format(sam3, locus)))
                         alleleFourDigit_index += 3
                 else:
                     allele2 = fourdigits2[locus]
                     if int(fourDigit_solutions2[locus]) > 1:
                         allele2 += "'"
-                    finalAlleles[locus] += "{}\t{}".format(allele2, get_max_P("{}.4digits{}2.solutions".format(sam2, locus)))
+                    finalAlleles[locus] += "{}\t{}".format(allele2, get_best_P("{}.4digits{}2.solutions".format(sam2, locus)))
                     alleleFourDigit_index += 3
 	
             #output the 4-digit type (stdout and to file)
@@ -379,14 +403,16 @@ class Pipeline(object):
             "hla_2_classical.HLAgenotype2digits",
             "hla_2_classical.HLAgenotype4digits",
             "hla.ambiguity",
-            "run.expression",
+            "hla_1_classical.expression",
+            "hla_1_nonclassical.expression",
+            "hla_2_classical.expression",
             "run.log"
         ]
 
         for filename in os.listdir(self.working_dir):
             if not filename in files_to_keep:
                 file_path = os.path.join(self.working_dir, filename)
-                self.logger.info("Removing {}.".format(file_path))
+                self.logger.debug("Removing {}.".format(file_path))
                 os.remove(file_path)
 
 
@@ -397,23 +423,13 @@ class Pipeline(object):
             self.logger.info("Skipping mapping step as already done...")
             return
         if iteration == 1:
-            if not self.gzipped:
-                mapping_cmd = "(bowtie -3 {} -S {} --al {} {} -1 {} -2 {} |  awk -F \'\\t\' '$3 != \"*\"{{ print $0 }}' > {}) 2> {}".format(self.trim3, mapopt, aligned_file, bowtiebuild, fq1, fq2, sam, bowtielog)
-            else:
-                mapping_cmd = "(bowtie -3 {} -S {} --al {} {} -1 <(zcat {}) -2 <(zcat {}) |  awk -F \'\\t\' '$3 != \"*\"{{ print $0 }}' > {}) 2> {}".format(self.trim3, mapopt, aligned_file, bowtiebuild, fq1, fq2, sam, bowtielog)
+            mapping_cmd = "(bowtie -3 {} -S {} --al {} -x {} -1 {} -2 {} |  awk -F \'\\t\' '$3 != \"*\"{{ print $0 }}' > {}) 2> {}".format(self.trim3, mapopt, aligned_file, bowtiebuild, fq1, fq2, sam, bowtielog)
         elif iteration == 2:
-            mapping_cmd = "bowtie -3 {} -S {} {} -1 {} -2 {} {}".format(self.trim3, mapopt, bowtiebuild, fq1, fq2, sam)
+            mapping_cmd = "bowtie -3 {} -S {} -x {} -1 {} -2 {} {}".format(self.trim3, mapopt, bowtiebuild, fq1, fq2, sam)
         #execute bowtie
         self.logger.info("CMD: {}".format(mapping_cmd))
         process_mapping = subprocess.Popen(['bash', '-c', mapping_cmd], stdout=subprocess.PIPE)
         out, err = process_mapping.communicate()
-	
-        if iteration == 1:
-            #print alignment stats
-            printcommand = "cat {}".format(bowtielog)
-            printcommand_proc = subprocess.Popen(['bash', '-c', printcommand], stdout=subprocess.PIPE)
-            out, err = printcommand_proc.communicate()
-            self.logger.info(out)
 
     
     def create_ref_dict(self, hlafasta, class1_list):
@@ -465,31 +481,22 @@ class Pipeline(object):
             readspergroup_dict[locus] = {}
             fourdigits_dict[locus] = {}
             fourdigits_sorted_dict[locus] = {}
-            alleleVector[locus] = ""
+            alleleVector[locus] = []
 
-        maxallelepergroup = {}
-	
-        #for each allele, to which at least 1 read map, find the allele which has the most reads within a group (2-digit-level, e.g. A*02") and save
-        #i) the key of this allele as ambassador for the group => maxallelepergroup holds for each group the top-scoring allele
-        #ii) the number of reads mapping to the top-scoring allele => readspergroup
-        for key in readcount:
-            if readcount[key] > 0:
-                group = key.split(":")[0]
-                if readspergroup[group] <= readcount[key]:
-                    readspergroup[group] = readcount[key]
-                    maxallelepergroup[group] = key
 
-        readspergrouphandle = open("{}.readspergrouphandle".format(sam), "a")
-        for group in readspergroup:
-            readspergrouphandle.write("{}\t{}\n".format(group, readspergroup[group]))
-        readspergrouphandle.close()
+        (top_counts, top_alleles) = get_best_allele_per_group(readspergroup, readcount)
+
+
+        with open("{}.readspergrouphandle".format(sam), "a") as outf:
+            for group in top_counts:
+                outf.write("{}\t{}\n".format(group, top_counts[group]))
         #consider all A-,B-, and C-groups seperately
         #readspergroup<A|B|C>list = list of all reads mapping to the top-scoring groups minus the decision threshold (which is 0 in the first iteration)
         #readspergroup<A|B|C> = contains the same entries as the list, but the entries are uniquely accessible via the group-key (e.g. B*27)
-        for key in readspergroup:
+        for key in top_counts:
             locus = key.split("*")[0]
-            readspergroup_dict_list[locus].append(readspergroup[key] - float(medians[locus]))
-            readspergroup_dict[locus][key] = readspergroup[key] - float(medians[locus])
+            readspergroup_dict_list[locus].append(top_counts[key] - float(medians[locus]))
+            readspergroup_dict[locus][key] = top_counts[key] - float(medians[locus])
 	
         #Determine top-scoring group of the whole locus (A,B,C) and store it
         #maxkey<A,B,C> = group (e.g. A*02) with the most reads
@@ -499,7 +506,7 @@ class Pipeline(object):
             if len(readspergroup_dict_list[locus]) > 0:
                 maxkey[locus] = max(readspergroup_dict[locus], key=lambda a:readspergroup_dict[locus].get(a))
                 if readspergroup_dict[locus][maxkey[locus]] > 0:
-                    maxAlleles[locus] = maxallelepergroup[maxkey[locus]]
+                    maxAlleles[locus] = top_alleles[maxkey[locus]]
                     allele_dict[locus] = maxkey[locus]
                 else:
                     allele_dict[locus] = "no"
@@ -519,10 +526,9 @@ class Pipeline(object):
             else:
                 iteration = 1
 	
-            fourdigit_writehandle = open("{}.4digits{}{}".format(sam, locus, iteration), "w")
-            for key in fourdigits_sorted_dict[locus]:
-                fourdigit_writehandle.write("{}: {}\n".format(key[0], key[1]))
-            fourdigit_writehandle.close()
+            with open("{}.4digits{}{}".format(sam, locus, iteration), "w") as outf:
+                for key in fourdigits_sorted_dict[locus]:
+                    outf.write("{}: {}\n".format(key[0], key[1]))
 
             readspergrouplocus = sorted(readspergroup_dict[locus].items(), key=itemgetter(1), reverse=True)
 
@@ -530,38 +536,39 @@ class Pipeline(object):
                 #in the 2nd iteration: 
                 #1.) DO NOT remove the top-scoring group from the set <a,b,c>vec as this is more strict when calculating the probability of the top scoring group being an outlier
                 #The strings <a,b,c>vec are used by the R-script to calculate the probability of the top scoring group being an outlier
-                for key in maxallelepergroup:
+
+                for key in top_alleles:
                     if key.split("*")[0] == locus:
-                        alleleVector[locus] += "{},".format(readcount[maxallelepergroup[key]])
+                        alleleVector[locus].append(readcount[top_alleles[key]])
                 #2.) Add the decision thresholds to the sets <a,b,c>vec, as this enables measuring the distance of the top-scoring group to this distance
                 if allele_dict[locus] == "no":
-                    alleleVector[locus] += str(medians[locus])
+                    alleleVector[locus].append(int(float(medians[locus])))
                 #3.) In case of, e.g. a loss of whole HLA-locus (A,B,C), <a,b,c>vec only contain median[<0|1|2>].
                 #To avoid errors in the R-Script, set to 0
-                if alleleVector[locus] == "" or alleleVector[locus] == medians[locus]:
-                    alleleVector[locus] = "0"
-                    alleleCount[locus] = "0"
+                if not alleleVector[locus] or alleleVector[locus][0] == int(float(medians[locus])):
+                    alleleVector[locus] = []
+                    alleleCount[locus] = 0
                 else:
-                    alleleCount[locus] = str(readcount[maxallelepergroup[maxkey[locus]]])
+                    alleleCount[locus] = readcount[top_alleles[maxkey[locus]]]
 
             else:
                 #in the 1st iteration: remove the top-scoring group from the set <a,b,c>vec as this increases the certainty when calculating the probability of the top scoring group being an outlier
-                for key in maxallelepergroup:
+                for key in top_alleles:
                     if key.split("*")[0] == locus:
                         if key != maxkey[locus]:
-                            alleleVector[locus] += "{},".format(readcount[maxallelepergroup[key]])
+                            alleleVector[locus].append(readcount[top_alleles[key]])
                 #2.) DO NOT add the decision thresholds to the sets <a,b,c>vec
-                if alleleVector[locus] == "":
-                    alleleVector[locus] = "0"
-                    alleleCount[locus] = "0"
+                if not alleleVector[locus]:
+                    alleleCount[locus] = 0
                 else:
-                    alleleCount[locus] = str(readcount[maxallelepergroup[maxkey[locus]]])
+                    alleleCount[locus] = readcount[top_alleles[maxkey[locus]]]
+
 
         confidence_vals = []
         for locus in locus_list:
-            allele_list = [float(x) for x in alleleVector[locus].rstrip(",").split(",")]
+            allele_list = [float(x) for x in alleleVector[locus]]
             confidence_val = calculate_confidence(float(alleleCount[locus]), allele_list)
-            confidence_vals.append((maxkey[locus], confidence_val, 1 - confidence_val))
+            confidence_vals.append((maxkey[locus], confidence_val))
 
         fourDigitString = ""
         if medianflag:
@@ -572,7 +579,7 @@ class Pipeline(object):
         self.logger.info("Determining 4 digits HLA type...")
         for locus in locus_list:
             if not allele_dict[locus] == "no":
-                fourDigitString += "{},{},".format(allele_dict[locus], fourdigits.determine_four_digits_main("{}.4digits{}{}".format(sam, locus, iteration), alleleVector[locus].rstrip(","), hla_class, hla_classification, ambiguityfile))
+                fourDigitString += "{},{},".format(allele_dict[locus], determine_four_digits_main("{}.4digits{}{}".format(sam, locus, iteration), alleleVector[locus], hla_class, hla_classification, ambiguityfile))
             else:
                 fourDigitString += "{},,,".format(allele_dict[locus])
 
@@ -590,7 +597,7 @@ class Pipeline(object):
                 outf.write("{}\t{}\t".format(locus, allele_dict[locus]))
                 #compute the decision threshold (median) for homozygosity vs. heterozygosity for the second iteration
                 outf.write("{}\t".format(np.median(list(readspergroup_dict[locus].values()))))
-                outf.write("{}\t{}\n".format(entries[index][0], entries[index][2]))
+                outf.write("{}\t{}\n".format(entries[index][0], entries[index][1]))
                 index += 1
 
         self.logger.info("The digital haplotype is written into {}".format(output))
@@ -717,7 +724,7 @@ class Pipeline(object):
                 self.logger.info("{}\t{}".format(locus, finalAlleles[locus]))
 
 
-    def expression(self, aligned, sam, logfile, alleles_in, locus_list, length_dict, hla_dict):
+    def expression(self, aligned, sam, output, logfile, alleles_in, locus_list, length_dict, hla_dict):
         """Calculate locus-specific expression."""
         totalreads = float(linecache.getline(logfile, 1).split(':')[1])
 
@@ -756,7 +763,7 @@ class Pipeline(object):
                     count[locus] += float(1.0 / float(n))
 	
         #Calculate RPKM and print expression values for each locus to stdout
-        with open(os.path.join(self.working_dir, "hla.expression"), 'w') as outf:
+        with open(output, 'w') as outf:
             for locus in count:
                 rpkm = float((1000.0 / length_dict[locus])) * float((1000000.0 / totalreads)) * count[locus]
                 self.logger.info("{}: {} RPKM".format(locus, rpkm))

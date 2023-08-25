@@ -1,0 +1,10 @@
+#Locus	Allele 1	Confidence	Allele 2	Confidence
+E	E*01	NA	hoz("E*01")	NA
+F	F*01	NA	hoz("F*01")	NA
+G	no	NA	hoz("G*01")	NA
+H	H*02	2.220446e-16	hoz("H*01")	0.0259602
+J	J*01	NA	hoz("J*01")	NA
+K	K*01	NA	hoz("K*01")	NA
+L	L*01	NA	hoz("L*01")	NA
+P	no	NA	hoz("P*02")	NA
+V	no	NA	hoz("V*01")	NA
