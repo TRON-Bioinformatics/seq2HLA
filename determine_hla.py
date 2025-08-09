@@ -15,7 +15,10 @@ top_alleles = {}
 np.seterr("raise")
 
 def calculate_confidence(allele_max, allele_count_list):
-    if not allele_count_list or len(allele_count_list) < 2:
+    allele_count_set = set(allele_count_list)
+
+    # Can't compute confidence when only one distinct value is present.
+    if not allele_count_list or len(allele_count_set) < 2:
         return 1.0
     mean = np.mean(allele_count_list)
     std = np.std(allele_count_list, ddof = 1)
